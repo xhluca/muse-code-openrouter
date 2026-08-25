@@ -14,6 +14,15 @@
   through OpenRouter without replacing the Muse Code harness.
 </p>
 
+<p align="center">
+  <a href="https://xhluca.github.io/muse-code-openrouter/"><img src="https://raw.githubusercontent.com/xhluca/muse-code-openrouter/main/docs/assets/demo.gif" alt="Install Muse Code OpenRouter, start Muse, and switch from Spark to Glimmer" width="760"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/xhluca/muse-code-openrouter/raw/main/docs/assets/demo.mp4">MP4</a> ·
+  <a href="https://xhluca.github.io/muse-code-openrouter/">Interactive demo</a>
+</p>
+
 ## Install
 
 ```bash
@@ -93,6 +102,7 @@ muse-openrouter uninstall --remove-package
 ```bash
 uv run --with pytest pytest
 uv run --with ruff ruff check .
+scripts/render-demo.sh
 ```
 
 [Interactive demo](https://xhluca.github.io/muse-code-openrouter/) ·
