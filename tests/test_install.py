@@ -1,3 +1,5 @@
+import json
+import shutil
 import stat
 
 from muse_code_openrouter.install import (
@@ -7,7 +9,11 @@ from muse_code_openrouter.install import (
     is_contributor_model_id,
     is_muse_model_id,
     patch_settings_document,
+    restore_muse_settings,
+    state_dir,
+    uninstall,
     write_credential,
+    write_systemd_unit,
 )
 
 MODEL = "meta/muse-spark-1.2"
@@ -88,3 +94,109 @@ def test_credential_written_privately(tmp_path, monkeypatch) -> None:
     assert path == credential_path()
     assert path.read_text().strip() == key
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_restore_removes_settings_that_were_absent_before_setup(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    settings = tmp_path / "config" / "muse" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps(
+            patch_settings_document({}, model=MODEL, port=8817, models=[METADATA])
+        )
+    )
+    marker = state_dir() / "settings.was-absent"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("\n")
+
+    result = restore_muse_settings()
+
+    assert "did not exist before setup" in result
+    assert not settings.exists()
+
+
+def test_restore_preserves_later_unrelated_preferences(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    settings = tmp_path / "config" / "muse" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    original = {
+        "schema_version": 1,
+        "provider": "meta",
+        "model": "meta/muse-spark-1.1",
+        "theme": "light",
+    }
+    current = patch_settings_document(
+        original, model=MODEL, port=8817, models=[METADATA, CONTRIBUTOR]
+    )
+    current["theme"] = "dark"
+    current["voice_enabled"] = False
+    settings.write_text(json.dumps(current))
+    backup = state_dir() / "settings.before-openrouter.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text(json.dumps(original))
+
+    restore_muse_settings()
+
+    restored = json.loads(settings.read_text())
+    assert restored["provider"] == original["provider"]
+    assert restored["model"] == original["model"]
+    assert "endpoint_transport" not in restored
+    assert "model_catalog" not in restored
+    assert restored["theme"] == "dark"
+    assert restored["voice_enabled"] is False
+    assert stat.S_IMODE(settings.stat().st_mode) == 0o600
+
+
+def test_restore_preserves_non_openrouter_transport_and_model(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    settings = tmp_path / "config" / "muse" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    current = {
+        "schema_version": 1,
+        "provider": "echo",
+        "model": "custom/model",
+        "endpoint_transport": {"base_url": "https://example.test/v1", "auth": "bearer"},
+    }
+    settings.write_text(json.dumps(current))
+    marker = state_dir() / "settings.was-absent"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("\n")
+
+    restore_muse_settings()
+
+    assert json.loads(settings.read_text()) == current
+
+
+def test_uninstall_cleans_isolated_install(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    settings = tmp_path / "config" / "muse" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps(
+            patch_settings_document({}, model=MODEL, port=8817, models=[METADATA])
+        )
+    )
+    marker = state_dir() / "settings.was-absent"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("\n")
+    credential = write_credential("sk-or-v1-" + "a" * 64)
+    unit = write_systemd_unit(MODEL, 8817)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        "muse_code_openrouter.install.shutil.which",
+        lambda command: "/bin/true" if command == "systemctl" else real_which(command),
+    )
+
+    assert uninstall(remove_package=False) == 0
+
+    assert not settings.exists()
+    assert not credential.exists()
+    assert not state_dir().exists()
+    assert not unit.exists()
+    output = capsys.readouterr().out
+    assert "integration removed" in output
+    assert "--remove-package" in output

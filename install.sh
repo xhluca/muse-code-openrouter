@@ -4,9 +4,9 @@
 set -eu
 
 package_name="muse-code-openrouter"
-package_version="0.3.0"
+package_version="0.3.1"
 wheel_name="muse_code_openrouter-${package_version}-py3-none-any.whl"
-wheel_sha256="db50143f5843610f4c0dc2829df38900a28837ddafb6256bd475556d841b0a4a"
+wheel_sha256="e8db55249f860e4135842cc3433fb066ce6deb3a64dce18294622325d173eb42"
 pypi_index_url="${MUSE_OPENROUTER_PYPI_INDEX_URL:-https://pypi.org/simple}"
 release_base_url="${MUSE_OPENROUTER_INSTALL_BASE_URL:-https://xhluca.github.io/muse-code-openrouter/releases/${package_version}}"
 package_spec="${package_name}==${package_version}"

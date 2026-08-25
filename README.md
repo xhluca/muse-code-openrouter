@@ -64,6 +64,20 @@ muse --model meta/muse-spark-1.2
 muse --model meta/muse-spark-1.2-contributor
 ```
 
+Remove the adapter, credential, service, and OpenRouter-owned Muse settings,
+restoring the settings saved before setup:
+
+```bash
+muse-openrouter uninstall
+```
+
+This keeps the command installed so setup can be run again. To also uninstall
+the `uv` tool package:
+
+```bash
+muse-openrouter uninstall --remove-package
+```
+
 Setup and `select` fetch the live catalog and write every current `meta/muse*`
 model as a visible Muse picker entry. Run `muse-openrouter select` again to pick
 up newly released models. OpenRouter account privacy settings and provider

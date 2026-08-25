@@ -7,12 +7,14 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +47,11 @@ def credential_path() -> Path:
 def muse_settings_path() -> Path:
     root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return root / "muse" / "settings.json"
+
+
+def systemd_unit_path() -> Path:
+    root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return root / "systemd" / "user" / "muse-code-openrouter.service"
 
 
 def muse_executable() -> str | None:
@@ -282,9 +289,8 @@ def write_muse_settings(model: str, port: int, models: list[dict[str, Any]]) -> 
 
 
 def write_systemd_unit(model: str, port: int) -> Path:
-    unit_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "systemd" / "user"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    path = unit_dir / "muse-code-openrouter.service"
+    path = systemd_unit_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     unit = f"""[Unit]
 Description=OpenRouter adapter for Meta Muse Code
 After=network-online.target
@@ -303,6 +309,252 @@ WantedBy=default.target
 """
     path.write_text(unit, encoding="utf-8")
     return path
+
+
+def _is_managed_transport(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("auth") != "none":
+        return False
+    base_url = value.get("base_url")
+    return isinstance(base_url, str) and re.fullmatch(
+        r"http://(?:127\.0\.0\.1|localhost):[0-9]+/v1", base_url
+    ) is not None
+
+
+def _is_managed_catalog_row(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if value.get("provider_id") != "meta" or value.get("profile_id") != "tbh":
+        return False
+    if not is_muse_model_id(value.get("model_id")):
+        return False
+    description = value.get("description")
+    return description == "Served through OpenRouter" or (
+        isinstance(description, str) and CONTRIBUTOR_INFO_URL in description
+    )
+
+
+def _restore_owned_settings(
+    current: dict[str, Any], original: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Remove adapter-owned fields while preserving unrelated later preferences."""
+    restored = dict(current)
+
+    def restore_field(name: str, managed: bool) -> None:
+        if not managed:
+            return
+        if original is not None and name in original:
+            restored[name] = original[name]
+        else:
+            restored.pop(name, None)
+
+    restore_field("provider", current.get("provider") == "meta")
+    restore_field("model", is_muse_model_id(current.get("model")))
+    restore_field("endpoint_transport", _is_managed_transport(current.get("endpoint_transport")))
+
+    catalog = current.get("model_catalog")
+    if isinstance(catalog, list):
+        managed_rows = [row for row in catalog if _is_managed_catalog_row(row)]
+        if managed_rows:
+            unmanaged_rows = [row for row in catalog if not _is_managed_catalog_row(row)]
+            if original is not None and "model_catalog" in original:
+                restored["model_catalog"] = original["model_catalog"]
+            elif unmanaged_rows:
+                restored["model_catalog"] = unmanaged_rows
+            else:
+                restored.pop("model_catalog", None)
+
+    if original is not None and "schema_version" in original:
+        restored["schema_version"] = original["schema_version"]
+    elif set(restored) == {"schema_version"} and restored.get("schema_version") == 1:
+        restored.clear()
+    return restored
+
+
+def _write_json_private(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.muse-openrouter-restore")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def restore_muse_settings() -> str:
+    """Restore settings saved before setup without losing unrelated later changes."""
+    path = muse_settings_path()
+    backup = state_dir() / "settings.before-openrouter.json"
+    absent_marker = state_dir() / "settings.was-absent"
+    if backup.exists() and absent_marker.exists():
+        raise RuntimeError("both Muse settings backup markers exist; refusing an ambiguous restore")
+
+    original: dict[str, Any] | None = None
+    if backup.exists():
+        try:
+            loaded = json.loads(backup.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Muse settings backup is not valid JSON: {backup}") from exc
+        if not isinstance(loaded, dict):
+            raise RuntimeError(f"Muse settings backup must contain a JSON object: {backup}")
+        original = loaded
+    elif absent_marker.exists():
+        original = {}
+
+    if not path.exists():
+        if original:
+            _write_json_private(path, original)
+            return f"restored from {backup}"
+        return "already at the default (no settings file)"
+
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Muse settings are not valid JSON; refusing to overwrite {path}"
+        ) from exc
+    if not isinstance(current, dict):
+        raise RuntimeError(f"Muse settings must contain a JSON object: {path}")
+
+    restored = _restore_owned_settings(current, original)
+    if restored:
+        _write_json_private(path, restored)
+        return f"restored {path}"
+    path.unlink()
+    with suppress(OSError):
+        path.parent.rmdir()
+    return f"removed {path} (it did not exist before setup)"
+
+
+def _read_process_command(pid: int) -> str:
+    proc_command = Path(f"/proc/{pid}/cmdline")
+    try:
+        return proc_command.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except OSError:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _stop_fallback_process() -> bool:
+    pid_path = state_dir() / "proxy.pid"
+    if not pid_path.exists():
+        return False
+    try:
+        pid = int(pid_path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"invalid adapter PID file: {pid_path}") from exc
+    command = _read_process_command(pid)
+    if not command:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pid_path.unlink(missing_ok=True)
+            return False
+        raise RuntimeError(f"could not verify that PID {pid} belongs to the adapter")
+    if not ("muse-openrouter" in command and "serve" in command):
+        raise RuntimeError(f"PID {pid} no longer belongs to the Muse OpenRouter adapter")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    else:
+        for _ in range(30):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    pid_path.unlink(missing_ok=True)
+    return True
+
+
+def stop_and_remove_service() -> str:
+    """Stop the adapter and remove only the unit created by this package."""
+    unit = systemd_unit_path()
+    stopped = False
+    if unit.exists():
+        content = unit.read_text(encoding="utf-8", errors="replace")
+        recognized = (
+            "OpenRouter adapter for Meta Muse Code" in content
+            and "muse-openrouter serve" in content
+        )
+        if not recognized:
+            raise RuntimeError(f"refusing to remove an unrecognized service unit: {unit}")
+        systemctl = shutil.which("systemctl")
+        if systemctl is None:
+            raise RuntimeError(f"systemctl is unavailable; cannot safely stop {unit}")
+        result = subprocess.run(
+            [systemctl, "--user", "disable", "--now", unit.name],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"could not stop {unit.name}: {detail}")
+        unit.unlink()
+        subprocess.run(
+            [systemctl, "--user", "daemon-reload"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        stopped = True
+    fallback_stopped = _stop_fallback_process()
+    if stopped:
+        return "stopped and removed systemd user service"
+    if fallback_stopped:
+        return "stopped detached adapter process"
+    return "adapter was not running"
+
+
+def uninstall(*, remove_package: bool) -> int:
+    """Remove the OpenRouter integration and restore Muse Code's prior settings."""
+    service_result = stop_and_remove_service()
+    settings_result = restore_muse_settings()
+
+    credential = credential_path()
+    credential.unlink(missing_ok=True)
+    with suppress(OSError):
+        credential.parent.rmdir()
+    shutil.rmtree(state_dir(), ignore_errors=True)
+
+    print(f"Adapter: {service_result}")
+    print(f"Muse Code settings: {settings_result}")
+    print(f"OpenRouter credential removed: {credential}")
+    print("Muse Code OpenRouter integration removed; restart Muse Code to use its defaults.")
+
+    if remove_package:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise RuntimeError(
+                "integration removed, but automatic package removal needs uv; "
+                "remove muse-code-openrouter with the package manager that installed it"
+            )
+        result = subprocess.run(
+            [uv, "tool", "uninstall", "muse-code-openrouter"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"integration removed, but package removal failed: {detail}")
+        print("Command package removed with uv.")
+    else:
+        print("The CLI package was kept. Add --remove-package to remove it too.")
+    return 0
 
 
 def start_service(model: str, port: int, *, use_systemd: bool = True) -> str:

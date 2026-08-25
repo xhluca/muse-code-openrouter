@@ -1,3 +1,3 @@
 """OpenRouter support for Meta Muse Code."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

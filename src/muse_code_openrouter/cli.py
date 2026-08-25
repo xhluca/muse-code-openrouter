@@ -15,6 +15,7 @@ from .install import (
     list_models,
     select_default_model,
     setup,
+    uninstall,
 )
 from .proxy import DEFAULT_UPSTREAM, proxy_main
 
@@ -55,6 +56,15 @@ def parser() -> argparse.ArgumentParser:
     select.add_argument("model", nargs="?", help="meta/muse* id (omit for a chooser)")
     select.add_argument("--port", type=int, default=DEFAULT_PORT)
     select.add_argument("--no-systemd", action="store_true")
+
+    remove = commands.add_parser(
+        "uninstall", help="remove the adapter and restore Muse Code's prior settings"
+    )
+    remove.add_argument(
+        "--remove-package",
+        action="store_true",
+        help="also remove the muse-openrouter command when installed with uv",
+    )
     return root
 
 
@@ -96,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 no_systemd=args.no_systemd,
             )
+        if args.command == "uninstall":
+            return uninstall(remove_package=args.remove_package)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
