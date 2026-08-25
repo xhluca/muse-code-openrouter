@@ -25,7 +25,7 @@ for command in agg ffmpeg; do
 done
 
 mkdir -p "$asset_dir" "$pages_dir/assets"
-agg --quiet --theme dracula --font-size 14 --cols 110 --rows 30 \
+agg --quiet --theme dracula --font-size 35 --cols 90 --rows 28 \
   --idle-time-limit 3600 --fps-cap 20 --last-frame-duration 3 \
   "$cast_file" "$asset_dir/demo.gif"
 ffmpeg -hide_banner -loglevel error -y -i "$asset_dir/demo.gif" \

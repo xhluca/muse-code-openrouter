@@ -47,7 +47,7 @@ Start Muse normally:
 muse
 ```
 
-Switch models during a session with `/models`, or choose one for a new run:
+Switch models during a session with `/model`, or choose one for a new run:
 
 ```bash
 muse --model meta/muse-glimmer-30b

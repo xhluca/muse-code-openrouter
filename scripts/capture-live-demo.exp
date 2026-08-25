@@ -1,6 +1,6 @@
 #!/usr/bin/expect -f
 
-# Record a genuine installer and two-turn, cross-model Muse session.
+# Record a genuine installer and two-turn, cross-model Muse TUI session.
 # The OpenRouter key is read from a file and entered only at getpass's
 # no-echo prompt. Asciinema's stdin recording must remain disabled.
 
@@ -21,9 +21,7 @@ if {![string match "sk-or-v1-*" $api_key]} {
 }
 
 set timeout 300
-set prompt "\033\[1;32mdemo@terminal\033\[0m:\033\[1;34m~\033\[0m$ "
-set session_id "48c0b89e-c98f-4c5f-a0a0-8fcb54d0c739"
-
+set prompt_tail {$ }
 # Keep the exact public install command while forcing its systemd probe to
 # fall back to the isolated background process managed by this recording.
 set demo_bin "$demo_home/demo-bin"
@@ -48,6 +46,24 @@ set env(COLORTERM) "truecolor"
 set env(CLICOLOR_FORCE) "1"
 set env(FORCE_COLOR) "1"
 
+# The recording starts in this isolated directory. Pre-trust only that empty
+# directory so `muse` opens directly into the TUI without a first-run prompt.
+set trust_dir "$demo_home/.config/muse"
+file mkdir $trust_dir
+set escaped_home [string map [list "\\" "\\\\" "\"" "\\\""] $demo_home]
+set trust_handle [open "$trust_dir/trust.json" w]
+puts $trust_handle "{\"schema_version\":1,\"projects\":{\"$escaped_home\":{\"decision\":\"trusted\"}}}"
+close $trust_handle
+
+# Muse's full-screen TUI queries terminal capabilities. tmux supplies the
+# terminal-emulation layer that a bare recorder PTY does not have; its own UI
+# is disabled so the recording still begins at the normal shell prompt.
+set tmux_config "$demo_home/tmux.conf"
+set tmux_handle [open $tmux_config w]
+puts $tmux_handle "set -g status off"
+close $tmux_handle
+set tmux_socket "muse-openrouter-demo-[pid]"
+
 proc type_command {text} {
     foreach character [split $text ""] {
         send -- $character
@@ -61,8 +77,41 @@ proc type_command {text} {
     send -- "\r"
 }
 
-spawn -noecho /bin/bash --noprofile --norc -i
-expect -exact $prompt
+proc type_tui {text} {
+    foreach character [split $text ""] {
+        send -- $character
+        # Muse redraws its composer for each keystroke. The delay keeps those
+        # real redraws visible instead of making the message look pasted.
+        set delay [expr {44 + int(rand() * 37)}]
+        after 25
+        expect -timeout 0 {
+            -re {.+} {}
+            timeout {}
+        }
+        after [expr {$delay - 25}]
+    }
+    after 500
+    send -- "\r"
+}
+
+proc visible_pause {milliseconds} {
+    # Keep draining Muse's PTY during pauses so asciinema records spinners,
+    # redraws, and model work at their real timestamps instead of in a batch.
+    set elapsed 0
+    while {$elapsed < $milliseconds} {
+        after 100
+        expect -timeout 0 {
+            -re {.+} {}
+            timeout {}
+        }
+        incr elapsed 100
+    }
+}
+
+cd $demo_home
+spawn -noecho tmux -f $tmux_config -L $tmux_socket new-session -x 90 -y 28 \
+    /bin/bash --noprofile --norc -i
+expect -exact $prompt_tail
 
 type_command "curl -LsSf https://xhluca.github.io/muse-code-openrouter/install.sh | sh"
 expect -exact "OpenRouter API key: "
@@ -73,7 +122,7 @@ expect {
     }
     timeout { puts stderr "timed out waiting for the model chooser"; exit 1 }
 }
-after 1200
+visible_pause 1200
 send -- $selected_index
 expect -exact $selected_index
 after 500
@@ -82,22 +131,49 @@ expect {
     -exact "Muse Code is ready. Run: muse" {}
     timeout { puts stderr "timed out waiting for installation"; exit 1 }
 }
-expect -exact $prompt
+expect -exact $prompt_tail
 
-type_command "muse exec --session-id $session_id --max-model-steps 1 \"Reply exactly: SPARK_READY\""
+type_command "muse"
 expect {
-    -exact "SPARK_READY" {}
-    timeout { puts stderr "Spark did not complete the live request"; exit 1 }
+    -exact "Model set to meta/muse-spark-1.2" {}
+    timeout { puts stderr "Muse TUI did not start with Spark"; exit 1 }
 }
-expect -exact $prompt
+after 1200
 
-type_command "muse exec --session-id $session_id --model meta/muse-glimmer-30b --max-model-steps 1 \"Reply exactly: GLIMMER_READY\""
+type_tui "Reply exactly: Hello from Spark."
 expect {
-    -exact "GLIMMER_READY" {}
-    timeout { puts stderr "Glimmer did not complete the resumed session"; exit 1 }
+    -re {◆[^\r\n]*Hello from Spark\.} {}
+    timeout { puts stderr "Spark did not complete the live TUI request"; exit 1 }
 }
-expect -exact $prompt
+visible_pause 3000
 
-after 1000
+type_tui "/model"
+expect {
+    -re {↑↓[^\r\n]*confirm} {}
+    timeout { puts stderr "Muse model picker did not open"; exit 1 }
+}
+visible_pause 1000
+send -- "\033\[A"
+visible_pause 900
+send -- "\033\[A"
+visible_pause 1200
+send -- "\r"
+expect {
+    -exact "Model set to meta/muse-glimmer-30b" {}
+    timeout { puts stderr "Muse did not switch to Glimmer"; exit 1 }
+}
+visible_pause 1200
+
+type_tui "Reply exactly: Hello from Glimmer."
+expect {
+    -re {◆[^\r\n]*Hello from Glimmer\.} {}
+    timeout { puts stderr "Glimmer did not complete the live TUI request"; exit 1 }
+}
+
+visible_pause 12000
+send -- "\003"
+visible_pause 300
+send -- "\003"
+expect -exact $prompt_tail
 send -- "exit\r"
 expect eof

@@ -15,7 +15,7 @@ if [[ ! -x "$script_dir/capture-live-demo.exp" ]]; then
   echo "capture-live-demo.exp is not executable" >&2
   exit 2
 fi
-for command in asciinema expect muse python3 uv; do
+for command in asciinema expect muse python3 tmux uv; do
   command -v "$command" >/dev/null 2>&1 || {
     echo "$command is required" >&2
     exit 2
@@ -60,8 +60,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-asciinema rec --quiet --overwrite --cols 110 --rows 30 \
-  --title "Muse Code OpenRouter — real install and model switch" \
+asciinema rec --quiet --overwrite --cols 90 --rows 28 \
+  --title "Muse Code OpenRouter — real install and Muse TUI model switch" \
   --command "$script_dir/capture-live-demo.exp '$key_file' '$demo_home'" \
   "$cast_file"
 
@@ -77,8 +77,8 @@ python3 "$script_dir/process-demo-cast.py" \
   "$cast_file" "$(id -un)" "$demo_home" "$repo_dir"
 
 for marker in \
-  "SPARK_READY" \
-  "GLIMMER_READY"; do
+  "Hello from Spark." \
+  "Hello from Glimmer."; do
   grep -aFq "$marker" "$cast_file" || {
     echo "recording is incomplete; missing: $marker" >&2
     exit 1

@@ -33,8 +33,8 @@ def main() -> int:
         ("Live Muse Code request through OpenRouter: accepted", "1;32"),
         ("Muse Code adapter: healthy", "1;32"),
         ("Muse Code is ready. Run: muse", "1;32"),
-        ("SPARK_READY", "1;32"),
-        ("GLIMMER_READY", "1;32"),
+        ("Hello from Spark.", "1;32"),
+        ("Hello from Glimmer.", "1;32"),
         ("meta/muse-glimmer-30b", "1;36"),
         ("meta/muse-spark-1.2-contributor", "1;36"),
         ("meta/muse-spark-1.2", "1;36"),
@@ -45,8 +45,34 @@ def main() -> int:
         entry = json.loads(line)
         if isinstance(entry, list) and len(entry) == 3 and entry[1] == "o":
             output = entry[2]
+            # The public demo ends on the stable Muse TUI. Do not publish the
+            # tmux alternate-screen teardown that follows the actual session.
+            if "To continue this session, run muse resume" in output:
+                break
             output = output.replace(repo_dir, "~/muse-code-openrouter")
             output = output.replace(account, "demo").replace(demo_home, "~")
+            # Muse draws this environment-specific notice in three cursor-
+            # positioned fragments before drawing the complete line. Remove
+            # all three fragments so no workstation-specific skill count is
+            # left behind in a full-screen TUI recording.
+            output = re.sub(
+                r"\x1b\[23;3HIncluding.*?(?=\x1b\[20;1H)",
+                "",
+                output,
+                flags=re.DOTALL,
+            )
+            output = re.sub(
+                r"\x1b\[23;45Hmanage.*?(?=\x1b\[21;3H)",
+                "",
+                output,
+                flags=re.DOTALL,
+            )
+            output = re.sub(
+                r"\x1b\[23;1H  Including.*?(?=\x1b\[24;1H)",
+                "",
+                output,
+                flags=re.DOTALL,
+            )
             output = re.sub(
                 r"muse: Including your \d+ Codex personal skills — manage with "
                 r"/settings\.\r?\r?\n",
@@ -54,7 +80,9 @@ def main() -> int:
                 output,
             )
             for phrase, code in highlights:
-                output = output.replace(phrase, styled(phrase, code))
+                colored_phrase = styled(phrase, code)
+                if colored_phrase not in output:
+                    output = output.replace(phrase, colored_phrase)
             entry[2] = output
         processed.append(json.dumps(entry, ensure_ascii=False, separators=(",", ":")))
 
