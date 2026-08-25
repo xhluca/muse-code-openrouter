@@ -390,11 +390,11 @@ def doctor(*, port: int, model: str | None, live: bool) -> int:
         settings = json.loads(muse_settings_path().read_text(encoding="utf-8"))
         expected = f"http://127.0.0.1:{port}/v1"
         configured_model = settings.get("model")
+        if not is_muse_model_id(configured_model):
+            failures.append("Muse Code model is not a meta/muse* model")
         checked_model = checked_model or configured_model
         if not is_muse_model_id(checked_model):
-            failures.append("Muse Code model is not a meta/muse* model")
-        elif configured_model != checked_model:
-            failures.append("Muse Code model setting does not match")
+            failures.append("requested diagnostic model is not a meta/muse* model")
         if (settings.get("endpoint_transport") or {}).get("base_url") != expected:
             failures.append("Muse Code endpoint setting does not match")
         if not failures:
