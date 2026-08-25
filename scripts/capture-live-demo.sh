@@ -77,12 +77,24 @@ python3 "$script_dir/process-demo-cast.py" \
   "$cast_file" "$(id -un)" "$demo_home" "$repo_dir"
 
 for marker in \
-  "Hello from Spark." \
-  "Hello from Glimmer."; do
+  "meta/muse-glimmer-30b" \
+  "Explain what is meta's muse glimmer"; do
   grep -aFq "$marker" "$cast_file" || {
     echo "recording is incomplete; missing: $marker" >&2
     exit 1
   }
+done
+
+for forbidden in \
+  "Reply exactly" \
+  "API Error 404" \
+  "web_search failed with HTTP" \
+  "did not finish the live TUI response" \
+  "Interrupted"; do
+  if grep -aFq "$forbidden" "$cast_file"; then
+    echo "recording contains an unwanted marker: $forbidden" >&2
+    exit 1
+  fi
 done
 
 echo "Recorded real workflow to $cast_file"

@@ -40,6 +40,11 @@ set env(UV_TOOL_DIR) "$demo_home/.local/share/uv/tools"
 set env(UV_TOOL_BIN_DIR) "$demo_home/.local/bin"
 set env(PATH) "$demo_home/.local/bin:$demo_bin:$env(PATH)"
 set env(MUSE_NO_AUTO_UPDATE) "1"
+# OpenRouter does not expose Muse's Meta-hosted web-search endpoint. Keep the
+# live demo on the model itself so a factual question does not invoke that
+# provider-specific tool.
+set env(MUSE_WEB_SEARCH_MODE) "off"
+set env(MUSE_ENABLE_WEB_TOOLS) "0"
 set env(PS1) {\[\e[1;32m\]demo@terminal\[\e[0m\]:\[\e[1;34m\]~\[\e[0m\]$ }
 set env(TERM) "xterm-256color"
 set env(COLORTERM) "truecolor"
@@ -108,6 +113,28 @@ proc visible_pause {milliseconds} {
     }
 }
 
+proc wait_for_tui_idle {socket timeout_ms} {
+    set elapsed 0
+    set stable_checks 0
+    while {$elapsed < $timeout_ms} {
+        visible_pause 500
+        incr elapsed 500
+        if {[catch {exec tmux -L $socket capture-pane -p -t 0} pane]} {
+            continue
+        }
+        if {[string first "esc to interrupt" $pane] < 0 && [regexp -line {^◆ .+} $pane]} {
+            incr stable_checks
+            if {$stable_checks >= 6} {
+                return
+            }
+        } else {
+            set stable_checks 0
+        }
+    }
+    puts stderr "Glimmer did not finish the live TUI response"
+    exit 1
+}
+
 cd $demo_home
 spawn -noecho tmux -f $tmux_config -L $tmux_socket new-session -x 90 -y 28 \
     /bin/bash --noprofile --norc -i
@@ -133,19 +160,24 @@ expect {
 }
 expect -exact $prompt_tail
 
+# Keep this factual demo concise while still launching Muse with the plain
+# `muse` command. The installer preserves existing Muse reasoning settings, so
+# this represents a normal user configured for minimal effort.
+set settings_path "$demo_home/.config/muse/settings.json"
+set settings_handle [open $settings_path r]
+set settings_json [read $settings_handle]
+close $settings_handle
+set settings_json [string replace $settings_json 0 0 "{\n  \"reasoning_effort\": \"minimal\","]
+set settings_handle [open $settings_path w]
+puts -nonewline $settings_handle $settings_json
+close $settings_handle
+
 type_command "muse"
 expect {
     -exact "Model set to meta/muse-spark-1.2" {}
     timeout { puts stderr "Muse TUI did not start with Spark"; exit 1 }
 }
 after 1200
-
-type_tui "Reply exactly: Hello from Spark."
-expect {
-    -re {◆[^\r\n]*Hello from Spark\.} {}
-    timeout { puts stderr "Spark did not complete the live TUI request"; exit 1 }
-}
-visible_pause 3000
 
 type_tui "/model"
 expect {
@@ -164,13 +196,14 @@ expect {
 }
 visible_pause 1200
 
-type_tui "Reply exactly: Hello from Glimmer."
+type_tui "Explain what is meta's muse glimmer"
 expect {
-    -re {◆[^\r\n]*Hello from Glimmer\.} {}
-    timeout { puts stderr "Glimmer did not complete the live TUI request"; exit 1 }
+    -re {◆} {}
+    timeout { puts stderr "Glimmer did not start the live TUI response"; exit 1 }
 }
 
-visible_pause 12000
+wait_for_tui_idle $tmux_socket 300000
+visible_pause 3000
 send -- "\003"
 visible_pause 300
 send -- "\003"
