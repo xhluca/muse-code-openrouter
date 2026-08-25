@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import ssl
+import threading
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -20,7 +21,12 @@ from .install import (
     is_muse_model_id,
     model_catalog_row,
 )
-from .rewrite import restore_response, rewrite_request
+from .rewrite import (
+    collect_encrypted_replay_ids,
+    filter_encrypted_replay_items,
+    restore_response,
+    rewrite_request,
+)
 
 LOG = logging.getLogger("muse-code-openrouter")
 DEFAULT_UPSTREAM = "https://openrouter.ai/api/v1"
@@ -41,6 +47,81 @@ PRIVATE_MUSE_HEADERS = {
     "traceparent",
     "x-fb-client-id",
 }
+MAX_TRACKED_SESSIONS = 4096
+
+
+def is_cross_model_encrypted_error(status: int, body: bytes) -> bool:
+    """Recognize OpenRouter's model-bound encrypted replay rejection."""
+    if status != 404:
+        return False
+    try:
+        payload = json.loads(body)
+        message = payload["error"]["message"].lower()
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        "encrypted" in message
+        and ("reasoning" in message or "compaction" in message)
+        and "different model" in message
+    )
+
+
+def upstream_error_summary(body: bytes) -> str:
+    """Return a bounded OpenRouter error summary without request data."""
+    try:
+        payload = json.loads(body)
+        error = payload["error"]
+        message = " ".join(str(error["message"]).split())
+        code = error.get("code")
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return "unparseable error response"
+    prefix = f"code={code}: " if code is not None else ""
+    return (prefix + message)[:500]
+
+
+class ModelReplayTracker:
+    """Track encrypted items that must not cross model boundaries per Muse session."""
+
+    def __init__(self, max_sessions: int = MAX_TRACKED_SESSIONS):
+        self.max_sessions = max_sessions
+        self._lock = threading.Lock()
+        self._models: dict[str, str] = {}
+        self._blocked: dict[str, set[str]] = {}
+
+    def prepare(
+        self, session_id: str | None, model: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], int, bool]:
+        """Filter stale replay state and report count and whether the model changed."""
+        if not session_id:
+            return payload, 0, False
+        identities = collect_encrypted_replay_ids(payload)
+        with self._lock:
+            previous_model = self._models.get(session_id)
+            switched = previous_model is not None and previous_model != model
+            blocked = self._blocked.setdefault(session_id, set())
+            if switched:
+                blocked.update(identities)
+            self._models[session_id] = model
+            blocked_snapshot = set(blocked)
+            self._prune_locked()
+        filtered, removed = filter_encrypted_replay_items(payload, blocked_snapshot)
+        if switched and "previous_response_id" in filtered:
+            filtered = dict(filtered)
+            filtered.pop("previous_response_id", None)
+        return filtered, removed, switched
+
+    def block(self, session_id: str | None, identities: set[str]) -> None:
+        """Remember replay items rejected by OpenRouter for a session."""
+        if not session_id or not identities:
+            return
+        with self._lock:
+            self._blocked.setdefault(session_id, set()).update(identities)
+
+    def _prune_locked(self) -> None:
+        while len(self._models) > self.max_sessions:
+            oldest = next(iter(self._models))
+            self._models.pop(oldest, None)
+            self._blocked.pop(oldest, None)
 
 
 def translate_catalog(payload: Any, selected_model: str) -> dict[str, Any]:
@@ -213,6 +294,7 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length) if length else b""
         aliases: dict[str, str] = {}
+        session_id = self.headers.get("X-TBH-Session-ID")
         try:
             payload = json.loads(body)
             selected_model = select_request_model(payload, self.adapter.model)
@@ -227,14 +309,25 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
                 payload,
                 self.adapter.output_limits.get(selected_model, DEFAULT_OUTPUT_LIMIT),
             )
+            payload, removed, switched = self.adapter.replay_tracker.prepare(
+                session_id, selected_model, payload
+            )
+            if switched:
+                LOG.info(
+                    "Muse session changed model to %s; discarded %d stale encrypted item(s)",
+                    selected_model,
+                    removed,
+                )
             payload, aliases = rewrite_request(payload)
             body = json.dumps(payload, separators=(",", ":")).encode()
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            LOG.warning("rejected Muse request before upstream: %s", exc)
             self._json_response(400, {"error": {"message": f"invalid request JSON: {exc}"}})
             return
 
-        connection, base_path = self._connection()
+        connection: http.client.HTTPConnection | None = None
         try:
+            connection, base_path = self._connection()
             connection.request(
                 "POST",
                 f"{base_path}/responses",
@@ -245,10 +338,55 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
             content_type = response.getheader("Content-Type", "")
             if response.status >= 400 or "text/event-stream" not in content_type:
                 upstream_body = response.read()
-                self._buffered_upstream(
-                    response.status, response.reason, response.getheaders(), upstream_body
+                LOG.warning(
+                    "OpenRouter returned HTTP %d for %s: %s",
+                    response.status,
+                    selected_model,
+                    upstream_error_summary(upstream_body),
                 )
-                return
+                rejected_ids = collect_encrypted_replay_ids(payload)
+                if is_cross_model_encrypted_error(response.status, upstream_body) and rejected_ids:
+                    retry_payload, removed = filter_encrypted_replay_items(payload, rejected_ids)
+                    retry_payload = dict(retry_payload)
+                    retry_payload.pop("previous_response_id", None)
+                    self.adapter.replay_tracker.block(session_id, rejected_ids)
+                    LOG.warning(
+                        "OpenRouter rejected model-bound replay state for %s; "
+                        "discarding %d encrypted item(s) and retrying once",
+                        selected_model,
+                        removed,
+                    )
+                    connection.close()
+                    body = json.dumps(retry_payload, separators=(",", ":")).encode()
+                    connection, base_path = self._connection()
+                    connection.request(
+                        "POST",
+                        f"{base_path}/responses",
+                        body=body,
+                        headers=self._upstream_headers(len(body)),
+                    )
+                    response = connection.getresponse()
+                    content_type = response.getheader("Content-Type", "")
+                    if response.status >= 400 or "text/event-stream" not in content_type:
+                        upstream_body = response.read()
+                        LOG.warning(
+                            "OpenRouter retry returned HTTP %d for %s: %s",
+                            response.status,
+                            selected_model,
+                            upstream_error_summary(upstream_body),
+                        )
+                        self._buffered_upstream(
+                            response.status,
+                            response.reason,
+                            response.getheaders(),
+                            upstream_body,
+                        )
+                        return
+                else:
+                    self._buffered_upstream(
+                        response.status, response.reason, response.getheaders(), upstream_body
+                    )
+                    return
             self.send_response(response.status, response.reason)
             for key, value in response.getheaders():
                 if key.lower() not in HOP_BY_HOP | {"content-length", "content-encoding"}:
@@ -286,7 +424,8 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
                 with suppress(OSError):
                     self._json_response(502, {"error": {"message": "OpenRouter request failed"}})
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
 
     def _write_chunk(self, data: bytes) -> None:
         self.wfile.write(f"{len(data):X}\r\n".encode())
@@ -336,6 +475,7 @@ class MuseOpenRouterServer(ThreadingHTTPServer):
         self.upstream = upstream.rstrip("/")
         self.output_limits: dict[str, int] = {}
         self.warned_contributor_models: set[str] = set()
+        self.replay_tracker = ModelReplayTracker()
 
 
 def serve(

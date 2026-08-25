@@ -20,6 +20,8 @@ The local adapter fixes those protocol differences:
 - preserves the requested `meta/muse*` model instead of pinning one model;
 - clamps Muse's output budget to each advertised model limit;
 - adds missing stream sequence numbers; and
+- discards model-bound encrypted reasoning/compaction state when switching models,
+  while preserving ordinary messages and tool history;
 - shortens and restores provider-incompatible function names when necessary.
 
 ## Install
@@ -63,6 +65,11 @@ muse --model meta/muse-spark-1.1
 muse --model meta/muse-spark-1.2
 muse --model meta/muse-spark-1.2-contributor
 ```
+
+You can also switch models from Muse's `/models` picker during a session. The
+adapter prevents encrypted reasoning from the old model being replayed to the
+new one, which avoids OpenRouter's cross-model 404. The visible conversation
+and tool history remain available.
 
 Remove the adapter, credential, service, and OpenRouter-owned Muse settings,
 restoring the settings saved before setup:

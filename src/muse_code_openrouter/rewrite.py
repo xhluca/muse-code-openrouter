@@ -8,6 +8,7 @@ from typing import Any
 
 MAX_TOOL_NAME_LENGTH = 64
 _HASH_LENGTH = 12
+ENCRYPTED_REPLAY_TYPES = frozenset({"reasoning", "compaction"})
 
 
 def alias_tool_name(name: str, max_length: int = MAX_TOOL_NAME_LENGTH) -> str:
@@ -60,6 +61,75 @@ def rewrite_request(payload: Any) -> tuple[Any, dict[str, str]]:
         return payload, {}
     rewritten = _rewrite_names(deepcopy(payload), original_to_alias)
     return rewritten, {alias: original for original, alias in original_to_alias.items()}
+
+
+def encrypted_replay_item_id(value: Any) -> str | None:
+    """Return a content-safe identity for model-bound Responses API state."""
+    if not isinstance(value, dict):
+        return None
+    item_type = value.get("type")
+    if not isinstance(item_type, str) or item_type not in ENCRYPTED_REPLAY_TYPES:
+        return None
+    encrypted_content = value.get("encrypted_content")
+    if not isinstance(encrypted_content, str) or not encrypted_content:
+        return None
+    material = f"{item_type}\0{encrypted_content}".encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+def collect_encrypted_replay_ids(payload: Any) -> set[str]:
+    """Collect identities without exposing or retaining encrypted payload content."""
+    identities: set[str] = set()
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        identity = encrypted_replay_item_id(value)
+        if identity is not None:
+            identities.add(identity)
+            continue
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, dict):
+            pending.extend(value.values())
+    return identities
+
+
+_DROP = object()
+
+
+def _filter_encrypted_replay_items(value: Any, blocked_ids: set[str]) -> tuple[Any, int]:
+    identity = encrypted_replay_item_id(value)
+    if identity is not None and identity in blocked_ids:
+        return _DROP, 1
+    if isinstance(value, list):
+        rewritten: list[Any] = []
+        removed = 0
+        for item in value:
+            filtered, count = _filter_encrypted_replay_items(item, blocked_ids)
+            removed += count
+            if filtered is not _DROP:
+                rewritten.append(filtered)
+        return (rewritten if removed else value), removed
+    if isinstance(value, dict):
+        rewritten_dict: dict[Any, Any] = {}
+        removed = 0
+        for key, item in value.items():
+            filtered, count = _filter_encrypted_replay_items(item, blocked_ids)
+            removed += count
+            if filtered is not _DROP:
+                rewritten_dict[key] = filtered
+        return (rewritten_dict if removed else value), removed
+    return value, 0
+
+
+def filter_encrypted_replay_items(
+    payload: Any, blocked_ids: set[str]
+) -> tuple[Any, int]:
+    """Remove encrypted reasoning/compaction items identified as model-incompatible."""
+    if not blocked_ids:
+        return payload, 0
+    filtered, removed = _filter_encrypted_replay_items(payload, blocked_ids)
+    return ({} if filtered is _DROP else filtered), removed
 
 
 def restore_response(payload: Any, alias_to_original: dict[str, str]) -> Any:
