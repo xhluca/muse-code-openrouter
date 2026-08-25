@@ -20,7 +20,7 @@
 
 <p align="center">
   <a href="https://github.com/xhluca/muse-code-openrouter/raw/main/docs/assets/demo.mp4">MP4</a> ·
-  <a href="https://xhluca.github.io/muse-code-openrouter/">Interactive demo</a>
+  <a href="https://xhluca.github.io/muse-code-openrouter/">Real terminal recording</a>
 </p>
 
 ## Install
@@ -104,6 +104,12 @@ uv run --with pytest pytest
 uv run --with ruff ruff check .
 scripts/render-demo.sh
 ```
+
+The demo is an asciinema capture of the real installer and live OpenRouter
+requests. Capture with a short-lived key file using
+`scripts/capture-live-demo.sh /path/to/key`, revoke that key, then render the
+GIF and MP4 with `scripts/render-demo.sh`. The key prompt is not echoed and
+stdin is never recorded.
 
 [Interactive demo](https://xhluca.github.io/muse-code-openrouter/) ·
 [PyPI](https://pypi.org/project/muse-code-openrouter/) ·
