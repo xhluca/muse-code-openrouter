@@ -2,10 +2,15 @@ import json
 
 import pytest
 
-from muse_code_openrouter.proxy import rewrite_sse_block, translate_catalog
+from muse_code_openrouter.proxy import (
+    enforce_output_limit,
+    rewrite_sse_block,
+    select_request_model,
+    translate_catalog,
+)
 
 
-def test_catalog_translation_for_selected_model() -> None:
+def test_catalog_translation_for_all_muse_models() -> None:
     payload = {
         "data": [
             {"id": "other/model", "name": "Other", "context_length": 10},
@@ -15,19 +20,46 @@ def test_catalog_translation_for_selected_model() -> None:
                 "context_length": 1_048_576,
                 "top_provider": {"max_completion_tokens": 65_536},
             },
+            {
+                "id": "meta/muse-spark-1.2-contributor",
+                "name": "Meta: Muse Spark 1.2 Contributor",
+                "context_length": 1_048_576,
+            },
         ]
     }
-    row = translate_catalog(payload, "meta/muse-spark-1.2")["data"][0]
-    assert row["model_id"] == "meta/muse-spark-1.2"
-    assert row["provider_id"] == "meta"
-    assert row["profile_id"] == "tbh"
-    assert row["is_default"] is True
-    assert row["context_limit"] == 1_048_576
+    rows = translate_catalog(payload, "meta/muse-spark-1.2")["data"]
+    assert [row["model_id"] for row in rows] == [
+        "meta/muse-spark-1.2",
+        "meta/muse-spark-1.2-contributor",
+    ]
+    assert all(row["provider_id"] == "meta" for row in rows)
+    assert all(row["profile_id"] == "tbh" for row in rows)
+    assert [row["model_id"] for row in rows if row["is_default"]] == [
+        "meta/muse-spark-1.2"
+    ]
+    assert rows[0]["context_limit"] == 1_048_576
 
 
 def test_catalog_rejects_missing_model() -> None:
     with pytest.raises(ValueError, match="not available"):
         translate_catalog({"data": []}, "meta/muse-spark-1.2")
+
+
+def test_request_preserves_any_meta_muse_model() -> None:
+    contributor = "meta/muse-spark-1.2-contributor"
+    assert select_request_model({"model": contributor}, "meta/muse-spark-1.2") == contributor
+    assert select_request_model({}, "meta/muse-spark-1.2") == "meta/muse-spark-1.2"
+
+
+def test_request_rejects_non_muse_model() -> None:
+    with pytest.raises(ValueError, match=r"meta/muse\*"):
+        select_request_model({"model": "openai/gpt-5"}, "meta/muse-spark-1.2")
+
+
+def test_large_muse_output_budget_is_clamped() -> None:
+    payload = {"max_output_tokens": 128_000, "max_tokens": 32_000}
+    enforce_output_limit(payload, 16_384)
+    assert payload == {"max_output_tokens": 16_384, "max_tokens": 16_384}
 
 
 def test_sse_adds_event_and_sequence_number() -> None:

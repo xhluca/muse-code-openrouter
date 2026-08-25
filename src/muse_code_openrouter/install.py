@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_PORT = 8817
+DEFAULT_MODEL = "meta/muse-spark-1.2"
+MUSE_MODEL_PATTERN = re.compile(r"^meta/muse[A-Za-z0-9._:-]*$")
 KEY_PATTERN = re.compile(r"^sk-or-v1-[A-Za-z0-9_-]{20,}$")
 
 
@@ -111,6 +113,8 @@ def validate_key(key: str) -> None:
 
 
 def fetch_model(key: str, model: str) -> dict[str, Any]:
+    if not is_muse_model_id(model):
+        raise ValueError("model must be an OpenRouter meta/muse* model")
     payload = _openrouter_json(f"https://openrouter.ai/api/v1/model/{model}", key)
     data = payload.get("data")
     if not isinstance(data, dict) or data.get("id") != model:
@@ -118,7 +122,34 @@ def fetch_model(key: str, model: str) -> dict[str, Any]:
     return data
 
 
-def model_catalog_row(model: str, metadata: dict[str, Any]) -> dict[str, Any]:
+def is_muse_model_id(model: Any) -> bool:
+    """Return whether a model id is inside the adapter's Meta Muse boundary."""
+    return isinstance(model, str) and MUSE_MODEL_PATTERN.fullmatch(model) is not None
+
+
+def fetch_muse_models(key: str) -> list[dict[str, Any]]:
+    """Fetch every currently available OpenRouter ``meta/muse*`` model."""
+    payload = _openrouter_json("https://openrouter.ai/api/v1/models", key)
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise RuntimeError("OpenRouter returned an invalid model catalog")
+    models = [
+        item
+        for item in data
+        if isinstance(item, dict) and is_muse_model_id(item.get("id"))
+    ]
+    models.sort(key=lambda item: item["id"])
+    if not models:
+        raise RuntimeError("OpenRouter did not return any meta/muse* models")
+    return models
+
+
+def model_catalog_row(
+    metadata: dict[str, Any], *, selected_model: str, display_order: int
+) -> dict[str, Any]:
+    model = metadata.get("id")
+    if not is_muse_model_id(model):
+        raise ValueError("model catalog row is not a meta/muse* model")
     context = _positive_int(metadata.get("context_length"), 128_000)
     provider = metadata.get("top_provider")
     output = _positive_int(
@@ -131,8 +162,8 @@ def model_catalog_row(model: str, metadata: dict[str, Any]) -> dict[str, Any]:
         "profile_id": "tbh",
         "display_label": metadata.get("name") or model,
         "visibility": "visible",
-        "display_order": 0,
-        "is_default": True,
+        "display_order": display_order,
+        "is_default": model == selected_model,
         "context_limit": context,
         "output_limit": min(output, context),
         "description": "Served through OpenRouter",
@@ -148,7 +179,7 @@ def _positive_int(value: Any, fallback: int) -> int:
 
 
 def patch_settings_document(
-    existing: dict[str, Any], *, model: str, port: int, metadata: dict[str, Any]
+    existing: dict[str, Any], *, model: str, port: int
 ) -> dict[str, Any]:
     updated = dict(existing)
     updated.setdefault("schema_version", 1)
@@ -158,11 +189,14 @@ def patch_settings_document(
         "base_url": f"http://127.0.0.1:{port}/v1",
         "auth": "none",
     }
-    updated["model_catalog"] = [model_catalog_row(model, metadata)]
+    # Let Muse fetch the live catalog from the loopback adapter. Removing an old
+    # static catalog also makes newly released meta/muse* models appear without
+    # another setup run.
+    updated.pop("model_catalog", None)
     return updated
 
 
-def write_muse_settings(model: str, port: int, metadata: dict[str, Any]) -> Path:
+def write_muse_settings(model: str, port: int) -> Path:
     path = muse_settings_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -189,7 +223,7 @@ def write_muse_settings(model: str, port: int, metadata: dict[str, Any]) -> Path
             absent_marker.write_text("\n", encoding="ascii")
             os.chmod(absent_marker, 0o600)
 
-    updated = patch_settings_document(existing, model=model, port=port, metadata=metadata)
+    updated = patch_settings_document(existing, model=model, port=port)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
@@ -292,11 +326,16 @@ def setup(
     )
     if not KEY_PATTERN.fullmatch(key):
         raise RuntimeError("the OpenRouter key has an unexpected format")
+    if not is_muse_model_id(model):
+        raise RuntimeError("model must be an OpenRouter meta/muse* model")
     if not no_validate:
         validate_key(key)
-    metadata = fetch_model(key, model)
+    models = fetch_muse_models(key)
+    available_ids = {item["id"] for item in models}
+    if model not in available_ids:
+        raise RuntimeError(f"OpenRouter model is not available: {model}")
     credential = write_credential(key)
-    settings = write_muse_settings(model, port, metadata)
+    settings = write_muse_settings(model, port)
     service = start_service(model, port, use_systemd=not no_systemd)
     for _ in range(50):
         if healthcheck(port):
@@ -308,12 +347,32 @@ def setup(
     print(f"Muse Code configured: {settings}")
     print(f"Adapter started via {service}")
     print(f"Model: {model}")
+    print(f"Available Meta Muse models: {len(models)}")
     print("Run Muse Code normally with: muse")
 
 
-def doctor(*, port: int, model: str, live: bool) -> int:
+def list_models(*, selected_model: str | None = None) -> int:
+    """Print the live OpenRouter Meta Muse catalog using the stored credential."""
+    if selected_model is None:
+        try:
+            settings = json.loads(muse_settings_path().read_text(encoding="utf-8"))
+            configured = settings.get("model")
+            selected_model = configured if is_muse_model_id(configured) else None
+        except (OSError, json.JSONDecodeError, AttributeError):
+            pass
+    key = read_credential()
+    models = fetch_muse_models(key)
+    for metadata in models:
+        model = metadata["id"]
+        marker = "*" if model == selected_model else " "
+        print(f"{marker} {model}\t{metadata.get('name') or model}")
+    return 0
+
+
+def doctor(*, port: int, model: str | None, live: bool) -> int:
     failures: list[str] = []
     key = ""
+    checked_model = model
     try:
         mode = stat.S_IMODE(credential_path().stat().st_mode)
         if mode != 0o600:
@@ -330,7 +389,11 @@ def doctor(*, port: int, model: str, live: bool) -> int:
     try:
         settings = json.loads(muse_settings_path().read_text(encoding="utf-8"))
         expected = f"http://127.0.0.1:{port}/v1"
-        if settings.get("model") != model:
+        configured_model = settings.get("model")
+        checked_model = checked_model or configured_model
+        if not is_muse_model_id(checked_model):
+            failures.append("Muse Code model is not a meta/muse* model")
+        elif configured_model != checked_model:
             failures.append("Muse Code model setting does not match")
         if (settings.get("endpoint_transport") or {}).get("base_url") != expected:
             failures.append("Muse Code endpoint setting does not match")
@@ -339,7 +402,7 @@ def doctor(*, port: int, model: str, live: bool) -> int:
     except (OSError, json.JSONDecodeError, AttributeError) as exc:
         failures.append(f"Muse Code settings are unavailable: {exc}")
 
-    if live and not failures:
+    if live and not failures and checked_model is not None:
         muse = muse_executable()
         if muse is None:
             failures.append("Muse Code executable not found")
@@ -351,7 +414,7 @@ def doctor(*, port: int, model: str, live: bool) -> int:
                     muse,
                     "exec",
                     "--model",
-                    model,
+                    checked_model,
                     "--no-session-log",
                     "--disable-write",
                     "--disable-shell",

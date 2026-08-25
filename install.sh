@@ -4,9 +4,9 @@
 set -eu
 
 package_name="muse-code-openrouter"
-package_version="0.1.0"
+package_version="0.2.0"
 wheel_name="muse_code_openrouter-${package_version}-py3-none-any.whl"
-wheel_sha256="02393447cd13ac7ac21d3e2f687142fb9c7a09735ef7f81b968d75e8810039e6"
+wheel_sha256="287ebcd64b01eaad6cf3f4f6f3cbc249f85dc97a3c1d19ec165e316214f30fa7"
 pypi_index_url="${MUSE_OPENROUTER_PYPI_INDEX_URL:-https://pypi.org/simple}"
 release_base_url="${MUSE_OPENROUTER_INSTALL_BASE_URL:-https://xhluca.github.io/muse-code-openrouter/releases/${package_version}}"
 package_spec="${package_name}==${package_version}"
@@ -26,7 +26,7 @@ Usage:
 
 Options:
   --install-only       Install Muse Code and the adapter without configuring a key.
-  --model MODEL        OpenRouter model slug (default: meta/muse-spark-1.2).
+  --model MODEL        Default meta/muse* model (default: meta/muse-spark-1.2).
   --port PORT          Loopback adapter port (default: 8817).
   --no-validate        Skip live OpenRouter key validation.
   --no-systemd         Use a detached process instead of a systemd user service.

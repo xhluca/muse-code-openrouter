@@ -8,8 +8,8 @@ import subprocess
 import sys
 
 from . import __version__
-from .install import DEFAULT_PORT, doctor, setup
-from .proxy import DEFAULT_MODEL, DEFAULT_UPSTREAM, proxy_main
+from .install import DEFAULT_MODEL, DEFAULT_PORT, doctor, list_models, setup
+from .proxy import DEFAULT_UPSTREAM, proxy_main
 
 
 def parser() -> argparse.ArgumentParser:
@@ -33,8 +33,10 @@ def parser() -> argparse.ArgumentParser:
 
     check = commands.add_parser("doctor", help="check the key, adapter, and Muse Code")
     check.add_argument("--live", action="store_true", help="send a small paid model request")
-    check.add_argument("--model", default=DEFAULT_MODEL)
+    check.add_argument("--model", help="model to test (default: current Muse setting)")
     check.add_argument("--port", type=int, default=DEFAULT_PORT)
+
+    commands.add_parser("models", help="list available OpenRouter meta/muse* models")
     return root
 
 
@@ -67,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "doctor":
             return doctor(port=args.port, model=args.model, live=args.live)
+        if args.command == "models":
+            return list_models()
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

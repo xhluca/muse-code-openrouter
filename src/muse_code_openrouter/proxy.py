@@ -13,11 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
+from .install import DEFAULT_MODEL, is_muse_model_id, model_catalog_row
 from .rewrite import restore_response, rewrite_request
 
 LOG = logging.getLogger("muse-code-openrouter")
 DEFAULT_UPSTREAM = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "meta/muse-spark-1.2"
+DEFAULT_OUTPUT_LIMIT = 16_384
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -40,45 +41,40 @@ def translate_catalog(payload: Any, selected_model: str) -> dict[str, Any]:
     """Translate OpenRouter's catalog into the schema required by Muse Code."""
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         raise ValueError("OpenRouter returned an invalid model catalog")
-    match = next(
-        (
-            item
-            for item in payload["data"]
-            if isinstance(item, dict) and item.get("id") == selected_model
-        ),
-        None,
-    )
-    if match is None:
+    models = [
+        item
+        for item in payload["data"]
+        if isinstance(item, dict) and is_muse_model_id(item.get("id"))
+    ]
+    models.sort(key=lambda item: item["id"])
+    if selected_model not in {item["id"] for item in models}:
         raise ValueError(f"model is not available on OpenRouter: {selected_model}")
-    context_limit = _positive_int(match.get("context_length"), 128_000)
-    provider = match.get("top_provider")
-    output_limit = _positive_int(
-        provider.get("max_completion_tokens") if isinstance(provider, dict) else None,
-        min(16_384, context_limit),
-    )
-    row = {
-        "id": selected_model,
-        "model_id": selected_model,
-        "provider_id": "meta",
-        "profile_id": "tbh",
-        "display_label": match.get("name") or selected_model,
-        "visibility": "visible",
-        "release_date": "2026-08-05",
-        "display_order": 0,
-        "is_default": True,
-        "context_limit": context_limit,
-        "output_limit": min(output_limit, context_limit),
-        "description": "Served through OpenRouter",
-    }
-    return {"data": [row]}
+    rows = []
+    for index, metadata in enumerate(models):
+        row = model_catalog_row(
+            metadata, selected_model=selected_model, display_order=index
+        )
+        row["id"] = metadata["id"]
+        rows.append(row)
+    return {"data": rows}
 
 
-def _positive_int(value: Any, fallback: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return parsed if parsed > 0 else fallback
+def select_request_model(payload: Any, default_model: str) -> str:
+    """Select an explicitly requested Meta Muse model or the configured default."""
+    if not isinstance(payload, dict):
+        raise ValueError("request body must be a JSON object")
+    requested = payload.get("model", default_model)
+    if not is_muse_model_id(requested):
+        raise ValueError("model must be an OpenRouter meta/muse* model")
+    return requested
+
+
+def enforce_output_limit(payload: dict[str, Any], output_limit: int) -> None:
+    """Clamp Muse's large default output budget to the advertised model limit."""
+    for field in ("max_output_tokens", "max_tokens"):
+        value = payload.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value > output_limit:
+            payload[field] = output_limit
 
 
 def rewrite_sse_block(
@@ -189,6 +185,9 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
                 )
                 return
             translated = translate_catalog(json.loads(body), self.adapter.model)
+            self.adapter.output_limits = {
+                row["model_id"]: row["output_limit"] for row in translated["data"]
+            }
             self._json_response(200, translated)
         except (OSError, ValueError, json.JSONDecodeError, http.client.HTTPException) as exc:
             LOG.error("catalog request failed: %s", exc)
@@ -202,10 +201,15 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
         aliases: dict[str, str] = {}
         try:
             payload = json.loads(body)
-            payload["model"] = self.adapter.model
+            selected_model = select_request_model(payload, self.adapter.model)
+            payload["model"] = selected_model
+            enforce_output_limit(
+                payload,
+                self.adapter.output_limits.get(selected_model, DEFAULT_OUTPUT_LIMIT),
+            )
             payload, aliases = rewrite_request(payload)
             body = json.dumps(payload, separators=(",", ":")).encode()
-        except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
             self._json_response(400, {"error": {"message": f"invalid request JSON: {exc}"}})
             return
 
@@ -310,6 +314,7 @@ class MuseOpenRouterServer(ThreadingHTTPServer):
         self.api_key = api_key
         self.model = model
         self.upstream = upstream.rstrip("/")
+        self.output_limits: dict[str, int] = {}
 
 
 def serve(
