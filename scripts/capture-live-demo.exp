@@ -4,13 +4,14 @@
 # The OpenRouter key is read from a file and entered only at getpass's
 # no-echo prompt. Asciinema's stdin recording must remain disabled.
 
-if {$argc != 2} {
-    puts stderr "usage: capture-live-demo.exp KEY_FILE DEMO_HOME"
+if {$argc != 3} {
+    puts stderr "usage: capture-live-demo.exp KEY_FILE DEMO_HOME PORT"
     exit 2
 }
 
 set key_file [lindex $argv 0]
 set demo_home [lindex $argv 1]
+set demo_port [lindex $argv 2]
 set key_handle [open $key_file r]
 set api_key [string trim [read $key_handle]]
 close $key_handle
@@ -21,7 +22,7 @@ if {![string match "sk-or-v1-*" $api_key]} {
 }
 
 set timeout 300
-set prompt "demo@terminal:~$ "
+set prompt "\033\[1;32mdemo@terminal\033\[0m:\033\[1;34m~\033\[0m$ "
 set session_id "48c0b89e-c98f-4c5f-a0a0-8fcb54d0c739"
 
 set env(HOME) $demo_home
@@ -32,22 +33,29 @@ set env(UV_TOOL_DIR) "$demo_home/.local/share/uv/tools"
 set env(UV_TOOL_BIN_DIR) "$demo_home/.local/bin"
 set env(PATH) "$demo_home/.local/bin:$env(PATH)"
 set env(MUSE_NO_AUTO_UPDATE) "1"
-set env(PS1) $prompt
+set env(PS1) {\[\e[1;32m\]demo@terminal\[\e[0m\]:\[\e[1;34m\]~\[\e[0m\]$ }
 set env(TERM) "xterm-256color"
+set env(COLORTERM) "truecolor"
+set env(CLICOLOR_FORCE) "1"
+set env(FORCE_COLOR) "1"
 
 proc type_command {text} {
     foreach character [split $text ""] {
         send -- $character
-        after 8
+        # Expect must read the echoed character now; otherwise its nested PTY
+        # buffers the whole command and asciinema makes it look pasted.
+        expect -exact $character
+        # A natural terminal cadence: visible keystrokes, with slight variance.
+        after [expr {55 + int(rand() * 46)}]
     }
-    after 250
+    after 500
     send -- "\r"
 }
 
 spawn -noecho /bin/bash --noprofile --norc -i
 expect -exact $prompt
 
-type_command "curl -LsSf https://xhluca.github.io/muse-code-openrouter/install.sh | sh -s -- --no-systemd --port 18817"
+type_command "curl -LsSf https://xhluca.github.io/muse-code-openrouter/install.sh | sh -s -- --no-systemd --port $demo_port"
 expect -exact "OpenRouter API key: "
 send -- "$api_key\r"
 expect {
@@ -61,7 +69,7 @@ expect {
 }
 expect -exact $prompt
 
-type_command "muse-openrouter doctor --live --port 18817"
+type_command "muse-openrouter doctor --live --port $demo_port"
 expect {
     -exact "Live Muse Code request through OpenRouter: accepted" {}
     timeout { puts stderr "the live adapter check did not succeed"; exit 1 }
@@ -82,12 +90,6 @@ expect {
 }
 expect -exact $prompt
 
-type_command "muse-openrouter uninstall"
-expect {
-    -exact "Muse Code OpenRouter integration removed; restart Muse Code to use its defaults." {}
-    timeout { puts stderr "the isolated integration did not uninstall cleanly"; exit 1 }
-}
-expect -exact $prompt
 after 1000
 send -- "exit\r"
 expect eof

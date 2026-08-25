@@ -25,8 +25,8 @@ for command in agg ffmpeg; do
 done
 
 mkdir -p "$asset_dir" "$pages_dir/assets"
-agg --quiet --theme asciinema --font-size 14 --cols 110 --rows 30 \
-  --idle-time-limit 2 --fps-cap 20 --last-frame-duration 3 \
+agg --quiet --theme dracula --font-size 14 --cols 110 --rows 30 \
+  --idle-time-limit 3600 --fps-cap 20 --last-frame-duration 3 \
   "$cast_file" "$asset_dir/demo.gif"
 ffmpeg -hide_banner -loglevel error -y -i "$asset_dir/demo.gif" \
   -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
