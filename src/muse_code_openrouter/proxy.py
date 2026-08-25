@@ -13,7 +13,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlsplit
 
-from .install import DEFAULT_MODEL, is_muse_model_id, model_catalog_row
+from .install import (
+    DEFAULT_MODEL,
+    contributor_warning,
+    is_contributor_model_id,
+    is_muse_model_id,
+    model_catalog_row,
+)
 from .rewrite import restore_response, rewrite_request
 
 LOG = logging.getLogger("muse-code-openrouter")
@@ -55,8 +61,16 @@ def translate_catalog(payload: Any, selected_model: str) -> dict[str, Any]:
             metadata, selected_model=selected_model, display_order=index
         )
         row["id"] = metadata["id"]
+        row["is_current"] = metadata["id"] == selected_model
+        row["title"] = row["display_label"]
+        row["metadata"] = {
+            "family": "muse",
+            "is_hidden": False,
+            "limit": {"context": row["context_limit"]},
+            "description": row["description"],
+        }
         rows.append(row)
-    return {"data": rows}
+    return {"schema_version": 1, "data": rows}
 
 
 def select_request_model(payload: Any, default_model: str) -> str:
@@ -202,6 +216,12 @@ class MuseOpenRouterHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(body)
             selected_model = select_request_model(payload, self.adapter.model)
+            if (
+                is_contributor_model_id(selected_model)
+                and selected_model not in self.adapter.warned_contributor_models
+            ):
+                LOG.warning(contributor_warning(selected_model))
+                self.adapter.warned_contributor_models.add(selected_model)
             payload["model"] = selected_model
             enforce_output_limit(
                 payload,
@@ -315,6 +335,7 @@ class MuseOpenRouterServer(ThreadingHTTPServer):
         self.model = model
         self.upstream = upstream.rstrip("/")
         self.output_limits: dict[str, int] = {}
+        self.warned_contributor_models: set[str] = set()
 
 
 def serve(

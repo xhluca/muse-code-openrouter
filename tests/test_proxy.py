@@ -27,7 +27,9 @@ def test_catalog_translation_for_all_muse_models() -> None:
             },
         ]
     }
-    rows = translate_catalog(payload, "meta/muse-spark-1.2")["data"]
+    translated = translate_catalog(payload, "meta/muse-spark-1.2")
+    assert translated["schema_version"] == 1
+    rows = translated["data"]
     assert [row["model_id"] for row in rows] == [
         "meta/muse-spark-1.2",
         "meta/muse-spark-1.2-contributor",
@@ -38,6 +40,9 @@ def test_catalog_translation_for_all_muse_models() -> None:
         "meta/muse-spark-1.2"
     ]
     assert rows[0]["context_limit"] == 1_048_576
+    assert rows[0]["output_limit"] == 16_384
+    assert rows[0]["is_current"] is True
+    assert rows[1]["display_label"].startswith("WARNING:")
 
 
 def test_catalog_rejects_missing_model() -> None:

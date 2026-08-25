@@ -18,6 +18,11 @@ from typing import Any
 
 DEFAULT_PORT = 8817
 DEFAULT_MODEL = "meta/muse-spark-1.2"
+CATALOG_OUTPUT_LIMIT = 16_384
+CONTRIBUTOR_DISCLOSURE = (
+    "Your prompts and outputs may be used to improve Meta's products."
+)
+CONTRIBUTOR_INFO_URL = "https://openrouter.ai/meta/muse-spark-1.2-contributor"
 MUSE_MODEL_PATTERN = re.compile(r"^meta/muse[A-Za-z0-9._:-]*$")
 KEY_PATTERN = re.compile(r"^sk-or-v1-[A-Za-z0-9_-]{20,}$")
 
@@ -127,6 +132,19 @@ def is_muse_model_id(model: Any) -> bool:
     return isinstance(model, str) and MUSE_MODEL_PATTERN.fullmatch(model) is not None
 
 
+def is_contributor_model_id(model: Any) -> bool:
+    """Return whether a model id carries the Contributor data-use tier marker."""
+    return isinstance(model, str) and "contributor" in model.lower()
+
+
+def contributor_warning(model: str) -> str:
+    """Return the official-disclosure-based warning for a Contributor model."""
+    return (
+        f"WARNING: {model} is a Contributor model. {CONTRIBUTOR_DISCLOSURE} "
+        f"Only continue if you accept this data use. Details: {CONTRIBUTOR_INFO_URL}"
+    )
+
+
 def fetch_muse_models(key: str) -> list[dict[str, Any]]:
     """Fetch every currently available OpenRouter ``meta/muse*`` model."""
     payload = _openrouter_json("https://openrouter.ai/api/v1/models", key)
@@ -152,22 +170,54 @@ def model_catalog_row(
         raise ValueError("model catalog row is not a meta/muse* model")
     context = _positive_int(metadata.get("context_length"), 128_000)
     provider = metadata.get("top_provider")
-    output = _positive_int(
+    reported_output = _positive_int(
         provider.get("max_completion_tokens") if isinstance(provider, dict) else None,
-        min(16_384, context),
+        CATALOG_OUTPUT_LIMIT,
     )
+    output = min(reported_output, CATALOG_OUTPUT_LIMIT, context)
+    contributor = is_contributor_model_id(model)
+    label = metadata.get("name") or model
+    description = "Served through OpenRouter"
+    if contributor:
+        label = f"WARNING: {label} (Contributor data use)"
+        description = f"WARNING: {CONTRIBUTOR_DISCLOSURE} {CONTRIBUTOR_INFO_URL}"
     return {
         "model_id": model,
         "provider_id": "meta",
         "profile_id": "tbh",
-        "display_label": metadata.get("name") or model,
+        "display_label": label,
         "visibility": "visible",
         "display_order": display_order,
         "is_default": model == selected_model,
         "context_limit": context,
         "output_limit": min(output, context),
-        "description": "Served through OpenRouter",
+        "description": description,
     }
+
+
+def choose_muse_model(models: list[dict[str, Any]], default_model: str) -> str:
+    """Prompt for a default from the already-fetched live Muse model catalog."""
+    ids = [metadata["id"] for metadata in models]
+    default_index = ids.index(default_model) if default_model in ids else 0
+    print("Choose the default Meta Muse model:")
+    for index, metadata in enumerate(models, 1):
+        model = metadata["id"]
+        suffix = " [Contributor: data-use warning]" if is_contributor_model_id(model) else ""
+        default = " [default]" if index - 1 == default_index else ""
+        print(f"  {index}) {model}{suffix}{default}")
+    while True:
+        answer = input(f"Model [1-{len(models)}] (default {default_index + 1}): ").strip()
+        if not answer:
+            selected = ids[default_index]
+            break
+        try:
+            selected = ids[int(answer) - 1]
+            break
+        except (ValueError, IndexError):
+            print(f"Enter a number from 1 to {len(models)}.", file=sys.stderr)
+    if is_contributor_model_id(selected):
+        print(contributor_warning(selected), file=sys.stderr)
+    return selected
 
 
 def _positive_int(value: Any, fallback: int) -> int:
@@ -179,7 +229,7 @@ def _positive_int(value: Any, fallback: int) -> int:
 
 
 def patch_settings_document(
-    existing: dict[str, Any], *, model: str, port: int
+    existing: dict[str, Any], *, model: str, port: int, models: list[dict[str, Any]]
 ) -> dict[str, Any]:
     updated = dict(existing)
     updated.setdefault("schema_version", 1)
@@ -189,14 +239,14 @@ def patch_settings_document(
         "base_url": f"http://127.0.0.1:{port}/v1",
         "auth": "none",
     }
-    # Let Muse fetch the live catalog from the loopback adapter. Removing an old
-    # static catalog also makes newly released meta/muse* models appear without
-    # another setup run.
-    updated.pop("model_catalog", None)
+    updated["model_catalog"] = [
+        model_catalog_row(metadata, selected_model=model, display_order=index)
+        for index, metadata in enumerate(models)
+    ]
     return updated
 
 
-def write_muse_settings(model: str, port: int) -> Path:
+def write_muse_settings(model: str, port: int, models: list[dict[str, Any]]) -> Path:
     path = muse_settings_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -223,7 +273,7 @@ def write_muse_settings(model: str, port: int) -> Path:
             absent_marker.write_text("\n", encoding="ascii")
             os.chmod(absent_marker, 0o600)
 
-    updated = patch_settings_document(existing, model=model, port=port)
+    updated = patch_settings_document(existing, model=model, port=port, models=models)
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(updated, indent=2) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
@@ -313,12 +363,15 @@ def setup(
     key_stdin: bool,
     no_validate: bool,
     no_systemd: bool,
+    choose_model: bool,
     model: str,
     port: int,
 ) -> None:
     muse = muse_executable()
     if muse is None:
         raise RuntimeError("Muse Code is not installed; install it from https://dev.meta.ai first")
+    if key_stdin and choose_model:
+        raise RuntimeError("--choose-model cannot be combined with --key-stdin")
     key = (
         sys.stdin.readline().strip()
         if key_stdin
@@ -332,10 +385,14 @@ def setup(
         validate_key(key)
     models = fetch_muse_models(key)
     available_ids = {item["id"] for item in models}
+    if choose_model:
+        model = choose_muse_model(models, model)
     if model not in available_ids:
         raise RuntimeError(f"OpenRouter model is not available: {model}")
+    if is_contributor_model_id(model) and not choose_model:
+        print(contributor_warning(model), file=sys.stderr)
     credential = write_credential(key)
-    settings = write_muse_settings(model, port)
+    settings = write_muse_settings(model, port, models)
     service = start_service(model, port, use_systemd=not no_systemd)
     for _ in range(50):
         if healthcheck(port):
@@ -365,7 +422,51 @@ def list_models(*, selected_model: str | None = None) -> int:
     for metadata in models:
         model = metadata["id"]
         marker = "*" if model == selected_model else " "
-        print(f"{marker} {model}\t{metadata.get('name') or model}")
+        warning = (
+            "\tWARNING: Contributor data-use terms apply"
+            if is_contributor_model_id(model)
+            else ""
+        )
+        print(f"{marker} {model}\t{metadata.get('name') or model}{warning}")
+    contributor_models = [item["id"] for item in models if is_contributor_model_id(item["id"])]
+    if contributor_models:
+        print(
+            f"WARNING for *contributor* models: {CONTRIBUTOR_DISCLOSURE} "
+            f"Details: {CONTRIBUTOR_INFO_URL}",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def select_default_model(*, model: str | None, port: int, no_systemd: bool) -> int:
+    """Select a default using the stored key and refresh Muse's visible catalog."""
+    key = read_credential()
+    models = fetch_muse_models(key)
+    current_model: str = DEFAULT_MODEL
+    try:
+        settings = json.loads(muse_settings_path().read_text(encoding="utf-8"))
+        configured = settings.get("model")
+        if is_muse_model_id(configured):
+            current_model = configured
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    selected = model or choose_muse_model(models, current_model)
+    available_ids = {item["id"] for item in models}
+    if selected not in available_ids:
+        raise RuntimeError(f"OpenRouter model is not available: {selected}")
+    if is_contributor_model_id(selected) and model is not None:
+        print(contributor_warning(selected), file=sys.stderr)
+    settings_path = write_muse_settings(selected, port, models)
+    service = start_service(selected, port, use_systemd=not no_systemd)
+    for _ in range(50):
+        if healthcheck(port):
+            break
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("the OpenRouter adapter did not become healthy")
+    print(f"Muse Code default model: {selected}")
+    print(f"Visible catalog refreshed: {settings_path} ({len(models)} models)")
+    print(f"Adapter restarted via {service}")
     return 0
 
 
@@ -397,12 +498,26 @@ def doctor(*, port: int, model: str | None, live: bool) -> int:
             failures.append("requested diagnostic model is not a meta/muse* model")
         if (settings.get("endpoint_transport") or {}).get("base_url") != expected:
             failures.append("Muse Code endpoint setting does not match")
+        visible_models = {
+            row.get("model_id")
+            for row in settings.get("model_catalog", [])
+            if isinstance(row, dict)
+            and row.get("visibility") == "visible"
+            and row.get("provider_id") == "meta"
+            and row.get("profile_id") == "tbh"
+        }
+        if not visible_models:
+            failures.append("Muse Code model catalog has no visible models")
+        elif checked_model not in visible_models:
+            failures.append("requested diagnostic model is not visible in Muse Code's catalog")
         if not failures:
             print(f"Muse Code settings: {muse_settings_path()}")
     except (OSError, json.JSONDecodeError, AttributeError) as exc:
         failures.append(f"Muse Code settings are unavailable: {exc}")
 
     if live and not failures and checked_model is not None:
+        if is_contributor_model_id(checked_model):
+            print(contributor_warning(checked_model), file=sys.stderr)
         muse = muse_executable()
         if muse is None:
             failures.append("Muse Code executable not found")

@@ -4,9 +4,9 @@
 set -eu
 
 package_name="muse-code-openrouter"
-package_version="0.2.1"
+package_version="0.3.0"
 wheel_name="muse_code_openrouter-${package_version}-py3-none-any.whl"
-wheel_sha256="259f0023433113c40ecff0872bb650e8ef42d606c18bdaced3a46de485cdc55b"
+wheel_sha256="db50143f5843610f4c0dc2829df38900a28837ddafb6256bd475556d841b0a4a"
 pypi_index_url="${MUSE_OPENROUTER_PYPI_INDEX_URL:-https://pypi.org/simple}"
 release_base_url="${MUSE_OPENROUTER_INSTALL_BASE_URL:-https://xhluca.github.io/muse-code-openrouter/releases/${package_version}}"
 package_spec="${package_name}==${package_version}"
@@ -26,7 +26,7 @@ Usage:
 
 Options:
   --install-only       Install Muse Code and the adapter without configuring a key.
-  --model MODEL        Default meta/muse* model (default: meta/muse-spark-1.2).
+  --model MODEL        Skip the chooser and use this default meta/muse* model.
   --port PORT          Loopback adapter port (default: 8817).
   --no-validate        Skip live OpenRouter key validation.
   --no-systemd         Use a detached process instead of a systemd user service.
@@ -34,12 +34,14 @@ Options:
   -h, --help           Show this help.
 
 The installer never accepts an API key as a command-line argument. Setup reads
-it from a hidden terminal prompt and stores it in a mode-0600 credential file.
+it from a hidden terminal prompt, shows a numbered model chooser, and stores the
+key in a mode-0600 credential file. Contributor choices display a data-use warning.
 EOF
 }
 
 install_only=0
 model="meta/muse-spark-1.2"
+choose_model=1
 port="8817"
 no_validate=0
 no_systemd=0
@@ -51,6 +53,7 @@ while [ "$#" -gt 0 ]; do
     --model)
       [ "$#" -ge 2 ] || die "--model requires a value"
       model=$2
+      choose_model=0
       shift 2
       ;;
     --port)
@@ -191,7 +194,11 @@ if [ "$install_only" -eq 1 ]; then
   exit 0
 fi
 
-set -- setup --model "$model" --port "$port"
+if [ "$choose_model" -eq 1 ]; then
+  set -- setup --choose-model --port "$port"
+else
+  set -- setup --model "$model" --port "$port"
+fi
 [ "$no_validate" -eq 1 ] && set -- "$@" --no-validate
 [ "$no_systemd" -eq 1 ] && set -- "$@" --no-systemd
 if [ -r /dev/tty ]; then
@@ -199,6 +206,10 @@ if [ -r /dev/tty ]; then
 else
   die "interactive setup needs a terminal; rerun muse-openrouter setup directly"
 fi
-"$installed_command" doctor --port "$port" --model "$model"
+if [ "$choose_model" -eq 1 ]; then
+  "$installed_command" doctor --port "$port"
+else
+  "$installed_command" doctor --port "$port" --model "$model"
+fi
 
 printf '\nMuse Code is ready. Run: muse\n'

@@ -29,8 +29,9 @@ curl -LsSf https://xhluca.github.io/muse-code-openrouter/install.sh | sh
 ```
 
 The installer installs Meta's official Muse Code launcher if `muse` is missing,
-installs this package for the current user, and prompts for the OpenRouter key
-without echoing it. Afterwards, use Muse Code normally:
+installs this package for the current user, prompts for the OpenRouter key
+without echoing it, and then presents a numbered default-model chooser.
+Afterwards, use Muse Code normally:
 
 ```bash
 muse
@@ -42,7 +43,19 @@ List every currently available Meta Muse model and mark the configured default:
 muse-openrouter models
 ```
 
-Select any listed model for a run without reconfiguring the adapter:
+Open the chooser again to change the default and refresh Muse's visible picker:
+
+```bash
+muse-openrouter select
+```
+
+Or select directly:
+
+```bash
+muse-openrouter select meta/muse-glimmer-30b
+```
+
+Select any listed model for only one run without changing the default:
 
 ```bash
 muse --model meta/muse-glimmer-30b
@@ -51,10 +64,14 @@ muse --model meta/muse-spark-1.2
 muse --model meta/muse-spark-1.2-contributor
 ```
 
-The catalog is fetched live, so newly released `meta/muse*` models appear
-automatically. OpenRouter account privacy settings and provider availability
-still apply. In particular, the Contributor model allows prompts and outputs to
-be used to improve Meta's products and may be blocked by restrictive OpenRouter
+Setup and `select` fetch the live catalog and write every current `meta/muse*`
+model as a visible Muse picker entry. Run `muse-openrouter select` again to pick
+up newly released models. OpenRouter account privacy settings and provider
+availability still apply.
+
+Contributor models are clearly marked wherever they are listed or selected.
+OpenRouter's official disclosure says: **Your prompts and outputs may be used to
+improve Meta's products.** They may also be blocked by restrictive OpenRouter
 data policies.
 
 Manual installation is also supported:
@@ -78,8 +95,9 @@ printf '%s\n' "$OPENROUTER_API_KEY" | muse-openrouter setup --key-stdin
   `${XDG_CONFIG_HOME:-~/.config}/muse-code-openrouter/credential`, mode `0600`.
 - Preserves Muse's other settings while updating `provider`, `model`, and
   `endpoint_transport` in `~/.config/muse/settings.json`.
-- Removes any old static model catalog so Muse reads the adapter's live
-  `meta/muse*` catalog.
+- Writes every current `meta/muse*` model into Muse's undocumented
+  `model_catalog` as a visible picker row, including context/output limits and
+  Contributor warnings.
 - Saves the original Muse settings under
   `${XDG_STATE_HOME:-~/.local/state}/muse-code-openrouter/`.
 - Starts a loopback-only adapter on `127.0.0.1:8817`, normally as a systemd user
