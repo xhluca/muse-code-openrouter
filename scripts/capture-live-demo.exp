@@ -4,14 +4,13 @@
 # The OpenRouter key is read from a file and entered only at getpass's
 # no-echo prompt. Asciinema's stdin recording must remain disabled.
 
-if {$argc != 3} {
-    puts stderr "usage: capture-live-demo.exp KEY_FILE DEMO_HOME PORT"
+if {$argc != 2} {
+    puts stderr "usage: capture-live-demo.exp KEY_FILE DEMO_HOME"
     exit 2
 }
 
 set key_file [lindex $argv 0]
 set demo_home [lindex $argv 1]
-set demo_port [lindex $argv 2]
 set key_handle [open $key_file r]
 set api_key [string trim [read $key_handle]]
 close $key_handle
@@ -25,13 +24,23 @@ set timeout 300
 set prompt "\033\[1;32mdemo@terminal\033\[0m:\033\[1;34m~\033\[0m$ "
 set session_id "48c0b89e-c98f-4c5f-a0a0-8fcb54d0c739"
 
+# Keep the exact public install command while forcing its systemd probe to
+# fall back to the isolated background process managed by this recording.
+set demo_bin "$demo_home/demo-bin"
+file mkdir $demo_bin
+set systemctl_handle [open "$demo_bin/systemctl" w]
+puts $systemctl_handle "#!/bin/sh"
+puts $systemctl_handle "exit 1"
+close $systemctl_handle
+file attributes "$demo_bin/systemctl" -permissions 0755
+
 set env(HOME) $demo_home
 set env(XDG_CONFIG_HOME) "$demo_home/.config"
 set env(XDG_STATE_HOME) "$demo_home/.local/state"
 set env(XDG_DATA_HOME) "$demo_home/.local/share"
 set env(UV_TOOL_DIR) "$demo_home/.local/share/uv/tools"
 set env(UV_TOOL_BIN_DIR) "$demo_home/.local/bin"
-set env(PATH) "$demo_home/.local/bin:$env(PATH)"
+set env(PATH) "$demo_home/.local/bin:$demo_bin:$env(PATH)"
 set env(MUSE_NO_AUTO_UPDATE) "1"
 set env(PS1) {\[\e[1;32m\]demo@terminal\[\e[0m\]:\[\e[1;34m\]~\[\e[0m\]$ }
 set env(TERM) "xterm-256color"
@@ -46,7 +55,7 @@ proc type_command {text} {
         # buffers the whole command and asciinema makes it look pasted.
         expect -exact $character
         # A natural terminal cadence: visible keystrokes, with slight variance.
-        after [expr {55 + int(rand() * 46)}]
+        after [expr {44 + int(rand() * 37)}]
     }
     after 500
     send -- "\r"
@@ -55,13 +64,19 @@ proc type_command {text} {
 spawn -noecho /bin/bash --noprofile --norc -i
 expect -exact $prompt
 
-type_command "curl -LsSf https://xhluca.github.io/muse-code-openrouter/install.sh | sh -s -- --no-systemd --port $demo_port"
+type_command "curl -LsSf https://xhluca.github.io/muse-code-openrouter/install.sh | sh"
 expect -exact "OpenRouter API key: "
 send -- "$api_key\r"
 expect {
-    -re {Model \[1-[0-9]+\] \(default [0-9]+\): } {}
+    -re {Model \[1-[0-9]+\] \(default ([0-9]+)\): } {
+        set selected_index $expect_out(1,string)
+    }
     timeout { puts stderr "timed out waiting for the model chooser"; exit 1 }
 }
+after 1200
+send -- $selected_index
+expect -exact $selected_index
+after 500
 send -- "\r"
 expect {
     -exact "Muse Code is ready. Run: muse" {}
@@ -69,14 +84,7 @@ expect {
 }
 expect -exact $prompt
 
-type_command "muse-openrouter doctor --live --port $demo_port"
-expect {
-    -exact "Live Muse Code request through OpenRouter: accepted" {}
-    timeout { puts stderr "the live adapter check did not succeed"; exit 1 }
-}
-expect -exact $prompt
-
-type_command "muse exec --session-id $session_id --model meta/muse-spark-1.2 --max-model-steps 1 \"Reply exactly: SPARK_READY\""
+type_command "muse exec --session-id $session_id --max-model-steps 1 \"Reply exactly: SPARK_READY\""
 expect {
     -exact "SPARK_READY" {}
     timeout { puts stderr "Spark did not complete the live request"; exit 1 }

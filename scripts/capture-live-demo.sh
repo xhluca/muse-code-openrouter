@@ -6,7 +6,6 @@ repo_dir="$(cd "$script_dir/.." && pwd)"
 key_file="${1:-}"
 cast_file="${2:-$repo_dir/docs/assets/demo.cast}"
 demo_home="${MUSE_OPENROUTER_DEMO_HOME:-}"
-demo_port="${MUSE_OPENROUTER_DEMO_PORT:-}"
 
 if [[ -z "$key_file" || ! -f "$key_file" ]]; then
   echo "usage: scripts/capture-live-demo.sh TEMPORARY_OPENROUTER_KEY_FILE [CAST_FILE]" >&2
@@ -22,13 +21,15 @@ for command in asciinema expect muse python3 uv; do
     exit 2
   }
 done
-if [[ -z "$demo_port" ]]; then
-  demo_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
-fi
-if [[ ! "$demo_port" =~ ^[0-9]+$ ]] || ((demo_port < 1 || demo_port > 65535)); then
-  echo "MUSE_OPENROUTER_DEMO_PORT must be a valid TCP port" >&2
-  exit 2
-fi
+python3 - <<'PY'
+import socket
+
+with socket.socket() as listener:
+    try:
+        listener.bind(("127.0.0.1", 8817))
+    except OSError as exc:
+        raise SystemExit(f"demo needs free port 8817 for the exact public install command: {exc}")
+PY
 if [[ -n "$demo_home" ]]; then
   if [[ -e "$demo_home" ]]; then
     echo "refusing to overwrite existing demo home: $demo_home" >&2
@@ -61,7 +62,7 @@ trap cleanup EXIT
 
 asciinema rec --quiet --overwrite --cols 110 --rows 30 \
   --title "Muse Code OpenRouter — real install and model switch" \
-  --command "$script_dir/capture-live-demo.exp '$key_file' '$demo_home' '$demo_port'" \
+  --command "$script_dir/capture-live-demo.exp '$key_file' '$demo_home'" \
   "$cast_file"
 
 # The terminal does not echo the key and asciinema does not capture stdin.
@@ -76,7 +77,6 @@ python3 "$script_dir/process-demo-cast.py" \
   "$cast_file" "$(id -un)" "$demo_home" "$repo_dir"
 
 for marker in \
-  "Live Muse Code request through OpenRouter: accepted" \
   "SPARK_READY" \
   "GLIMMER_READY"; do
   grep -aFq "$marker" "$cast_file" || {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -46,6 +47,12 @@ def main() -> int:
             output = entry[2]
             output = output.replace(repo_dir, "~/muse-code-openrouter")
             output = output.replace(account, "demo").replace(demo_home, "~")
+            output = re.sub(
+                r"muse: Including your \d+ Codex personal skills — manage with "
+                r"/settings\.\r?\r?\n",
+                "",
+                output,
+            )
             for phrase, code in highlights:
                 output = output.replace(phrase, styled(phrase, code))
             entry[2] = output
