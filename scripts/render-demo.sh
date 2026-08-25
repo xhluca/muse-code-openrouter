@@ -29,7 +29,7 @@ agg --quiet --theme dracula --font-size 35 --cols 90 --rows 28 \
   --idle-time-limit 3600 --fps-cap 20 --last-frame-duration 3 \
   "$cast_file" "$asset_dir/demo.gif"
 ffmpeg -hide_banner -loglevel error -y -i "$asset_dir/demo.gif" \
-  -vf "pad=ceil(iw/2)*2:ceil(ih/2)*2" \
+  -vf "fps=60,pad=ceil(iw/2)*2:ceil(ih/2)*2" \
   -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p -movflags +faststart \
   "$asset_dir/demo.mp4"
 install -m 0644 "$cast_file" "$pages_dir/assets/demo.cast"
